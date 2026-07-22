@@ -15,7 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "CB —"
+        if let button = statusItem.button, let logo = Logo.statusImage() {
+            button.image = logo
+            button.imagePosition = .imageLeading
+        }
+        statusItem.button?.title = " —"
         rebuildMenu()
 
         refreshMeta()
@@ -42,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self = self else { return }
                 self.refreshInFlight = false
                 self.snapshot = snap
-                self.statusItem.button?.title = snap.titleText
+                self.statusItem.button?.title = " " + snap.titleText
                 self.rebuildMenu()
             }
         }

@@ -38,7 +38,7 @@ struct Snapshot {
     var agents: [AgentRow] = []
 
     var titleText: String {
-        ok ? "CB ▸\(running.count) ●\(queued.count)" : "CB —"
+        ok ? "▸\(running.count) ●\(queued.count)" : "—"
     }
 }
 
