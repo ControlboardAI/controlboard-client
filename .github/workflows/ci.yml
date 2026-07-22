@@ -1,0 +1,26 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install
+      - run: pnpm check
+      - run: pnpm build
+      - run: node dist/cb.mjs --version
+  menubar:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd menubar && bash build-app.sh
