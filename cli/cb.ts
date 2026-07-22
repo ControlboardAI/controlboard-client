@@ -140,8 +140,101 @@ async function api(method: string, path: string, body?: unknown): Promise<any> {
   } catch {
     data = { raw: text };
   }
-  if (!res.ok) die(`${method} ${path} -> ${res.status}: ${JSON.stringify(data)}`, res.status === 409 ? 3 : 1);
+  if (!res.ok) {
+    // A definitive invalid-key on a CONFIG-saved credential means this agent was
+    // deregistered (revoked in the app's Registered agents). Self-heal: remove
+    // the dead local credentials so the machine matches the server.
+    if (res.status === 401 && data?.error === "invalid_api_key" && !process.env.CONTROLBOARD_API_KEY && CANONICAL_BASE) {
+      const lbl = activeLabel(cfg);
+      if (lbl && cfg.agents?.[lbl]?.key === KEY) {
+        pruneAgent(lbl);
+        die(
+          `Agent "${lbl}" was deregistered (its key was revoked — e.g. from Registered agents in the app).\n` +
+            `Removed its local credentials. Re-register with: cb login --label ${lbl}`,
+          1,
+        );
+      }
+      if (!lbl && cfg.key === KEY) {
+        pruneLegacyKey();
+        die(
+          "This key was deregistered (revoked — e.g. from Registered agents in the app).\n" +
+            "Removed the local credentials. Re-register with: cb login --label <agent-name>",
+          1,
+        );
+      }
+    }
+    die(`${method} ${path} -> ${res.status}: ${JSON.stringify(data)}`, res.status === 409 ? 3 : 1);
+  }
   return data;
+}
+
+// Remove one agent's saved credentials (and repoint the default if needed).
+// Re-reads config.json first: a long-lived process (cb work --watch) holds a
+// startup snapshot, and rewriting from that would clobber identities added since.
+function pruneAgent(label: string): void {
+  const fresh = readConfig();
+  const agents = { ...(fresh.agents || {}) };
+  delete agents[label];
+  const next: Config = { ...withoutLegacy(fresh), agents };
+  if (next.default === label) delete next.default;
+  writeConfig(next);
+}
+function pruneLegacyKey(): void {
+  writeConfig(withoutLegacy(readConfig()));
+}
+// Only treat a 401 as a definitive revocation against the REAL server: with a
+// CONTROLBOARD_URL override (staging/self-hosted), an unknown key there says
+// nothing about the credential's home server — never destroy it.
+const CANONICAL_BASE = !process.env.CONTROLBOARD_URL;
+
+// cb logout [--label <name>] — full deregistration from the machine side:
+// revoke THIS agent's key server-side (self only; the same task cascade the UI
+// revoke runs), then remove the local credentials. Mirrors UI-revoke → 401 prune.
+async function logout(labelFlag?: string): Promise<void> {
+  const label = labelFlag || activeLabel(cfg);
+  const legacy = !label && !!cfg.key; // pre-label single-agent config
+  const key = label ? cfg.agents?.[label]?.key : cfg.key;
+  if (!key) {
+    die(`No saved agent${labelFlag ? ` "${labelFlag}"` : ""} to log out (see ${CONFIG_FILE}).`, 2);
+  }
+  const who = label ? `"${label}"` : "the legacy key";
+  let status = 0;
+  try {
+    const res = await fetch(`${BASE}/api/v1/agents/self`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    status = res.status;
+    const d: any = await res.json().catch(() => ({}));
+    if (res.ok) {
+      console.log(
+        d.lastKey === false
+          ? `Server: revoked this key of "${d.slug}" (other keys for that identity remain active).`
+          : `Server: revoked "${d.slug}". Queued tasks unassigned: ${d.unassigned}; in-flight released → Blocked for review: ${d.released}.`,
+      );
+    } else if (res.status === 401 && CANONICAL_BASE) {
+      console.log("Server: key was already revoked (deregistered earlier from the app).");
+    } else {
+      // The revoke did NOT happen (server error, or a 401 against a non-default
+      // CONTROLBOARD_URL that proves nothing). Keep the only copy of the key —
+      // pruning now would strand a live credential server-side.
+      die(
+        `Server revoke did not complete (${res.status}${CANONICAL_BASE ? "" : ` against ${BASE}`}). ` +
+          `Local credentials for ${who} were KEPT. Retry when reachable, or revoke it under Registered agents in the app (cb will then clean up on its next 401).`,
+        1,
+      );
+    }
+  } catch {
+    die(
+      `Server unreachable — the key was NOT revoked. Local credentials for ${who} were KEPT. ` +
+        "Retry when online, or revoke it under Registered agents in the app.",
+      1,
+    );
+  }
+  if (label) pruneAgent(label);
+  else if (legacy) pruneLegacyKey();
+  console.log(`Logged out ${who} — local credentials removed.`);
+  console.log("If this agent had an MCP registration or a scheduler, remove those too (e.g. `claude mcp remove controlboard`, its scheduled task/Automation).");
 }
 
 const q = (o: Record<string, unknown>): string => {
@@ -503,6 +596,7 @@ Project:  --project <id>  |  CONTROLBOARD_PROJECT=<id>  |  cb project use <id>
   cb skill install                       # ambient board skill for Claude Code + Codex (offer-to-track)
   cb ambient on|off                      # toggle the ambient "track this?" offer
   cb version | self-update               # show the client version / refresh ~/.controlboard from the server
+  cb logout [--label <name>]             # deregister this agent: revoke its key (self only) + remove local creds
   cb propose "<title>" [--why "..."]
   cb inbox | approve <id> | reject <id> [--reason "..."]
   cb activity [--since <ms> --limit <n>]
@@ -934,6 +1028,8 @@ async function main(): Promise<void> {
       return out(`cb ${CB_VERSION}`, { version: CB_VERSION });
     case "self-update":
       return selfUpdate();
+    case "logout":
+      return logout(typeof flags.label === "string" ? flags.label : undefined);
     case "skill": {
       if (sub === "install") return skillInstall();
       return die("Usage: cb skill install", 2);

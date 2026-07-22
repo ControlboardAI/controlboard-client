@@ -95,7 +95,11 @@ async function api(method: string, path: string, body?: unknown): Promise<any> {
     data = { raw: text };
   }
   if (!res.ok) {
-    throw new Error(`ControlBoard API ${method} ${path} -> ${res.status}: ${JSON.stringify(data)}`);
+    const hint =
+      res.status === 401
+        ? " (this agent may have been deregistered — run `cb login --label <agent>` again, then restart this MCP server)"
+        : "";
+    throw new Error(`ControlBoard API ${method} ${path} -> ${res.status}: ${JSON.stringify(data)}${hint}`);
   }
   return data;
 }
