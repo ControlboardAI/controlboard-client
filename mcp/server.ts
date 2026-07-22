@@ -280,12 +280,13 @@ const tools: Tool[] = [
   },
   {
     name: "get_next_task",
-    description: "Get the single highest-value ready task to work on (skips done/blocked and tasks actively claimed by someone else). Auto-scoped to YOU: unassigned tasks, tasks assigned to you, and your crew's pool ('crew:<name>'). Pass claim:true to atomically claim it so other agents skip it; assignee overrides the scope.",
+    description: "Get the single highest-value ready task to work on (skips done/blocked and tasks actively claimed by someone else). Auto-scoped to YOU: unassigned tasks, tasks assigned to you, and your crew's pool ('crew:<name>'). Pass claim:true to atomically claim it so other agents skip it; assignee overrides the scope. Pass strict:true to take ONLY explicitly-assigned work (never unassigned) — required posture for unattended schedulers.",
     inputSchema: {
       type: "object",
       properties: {
         assignee: { type: "string", description: "override the auto scope: only tasks owned by this assignee (or unassigned)" },
         claim: { type: "boolean", description: "true = claim the returned task in the same call" },
+        strict: { type: "boolean", description: "true = only tasks explicitly assigned to you/your crew; skip unassigned (scheduler-safe)" },
       },
     },
     run: (a) => api("GET", `/tasks/next${qs(a)}`),
@@ -668,7 +669,7 @@ Coordination directives (the board is the single source of truth between distrib
 4. Assign with a rationale. When you hand work to an agent or crew, pass rationale — it lands as a comment so the assignee knows why them and with what intent.
 5. Route by headroom. list_agents shows each agent's default model and self-reported usage snapshot; prefer assignees with quota left. Report your own after heavy work: PATCH /agents/self usage (cb usage set).
 6. The queue is shared and orderable. rank sets explicit order (lower first, ranked beats unranked); the human can drag the same queue in the app. Reorder deliberately, not casually, and say why in a comment when you shuffle someone else's priorities.
-7. Have a heartbeat. If your platform can schedule (Claude Code scheduled tasks/cron, Codex Automations, Cursor Automations, Hermes heartbeat jobs, OpenClaw HEARTBEAT.md/cron), keep a recurring job that runs the pull loop (cb work, or get_next_task {claim:true}) so assignments reach you without a human relaying them.
+7. Have a heartbeat. If your platform can schedule (Claude Code scheduled tasks/cron, Codex Automations, Cursor Automations, Hermes heartbeat jobs, OpenClaw HEARTBEAT.md/cron), keep a recurring job that runs the pull loop — cb work --assigned, or get_next_task {claim:true, strict:true} — so assignments reach you without a human relaying them. Schedulers MUST use the assigned/strict form: unattended workers take only explicitly-assigned work, never the human's untriaged (unassigned) backlog.
 
 Assign across the fleet: every item has an owner. list_agents to discover teammates, then assign_task {id, assignee:'agent:<slug>'} to hand work to a peer, 'me' to route a decision to the human, or your own slug to take it. Scope your queue with get_next_task {assignee:'agent:<you>'}.
 

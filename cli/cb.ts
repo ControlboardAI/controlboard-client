@@ -5,7 +5,7 @@
 // Auth: `cb login <cbk_...>` (stored in ~/.config/controlboard/config.json) or the
 // CONTROLBOARD_API_KEY env. Target a project with --project <id> / CONTROLBOARD_PROJECT
 // / `cb project use <id>`. Global --json for machine output.
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, readdirSync, statSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, readdirSync, statSync, existsSync, unlinkSync } from "fs";
 import { homedir, hostname, userInfo } from "os";
 import { join } from "path";
 import { spawn, spawnSync } from "child_process";
@@ -61,7 +61,7 @@ const slugify = (s: string): string =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "agent";
 
 // Flags that never take a value (so they don't swallow the next positional).
-const BOOL = new Set(["json", "claim", "help", "done", "force", "once", "watch", "version"]);
+const BOOL = new Set(["json", "claim", "help", "done", "force", "once", "watch", "version", "assigned"]);
 function parse(argv: string[]): { pos: string[]; flags: Record<string, string | boolean> } {
   const pos: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -418,8 +418,8 @@ function workPrompt(t: any): string {
   ].filter(Boolean).join("\n") + "\n";
 }
 
-async function workOnce(): Promise<void> {
-  const d = await api("GET", "/tasks/next?claim=true");
+async function workOnce(assignedOnly = false): Promise<void> {
+  const d = await api("GET", `/tasks/next?claim=true${assignedOnly ? "&strict=true" : ""}`);
   if (!d.task) {
     process.exitCode = 4; // empty queue — callers guard with: t=$(cb work --once) && ...
     return;
@@ -438,7 +438,7 @@ function runExec(cmd: string, prompt: string): Promise<number> {
   });
 }
 
-async function workWatch(execCmd: string, intervalS: number): Promise<void> {
+async function workWatch(execCmd: string, intervalS: number, assignedOnly = false): Promise<void> {
   process.stderr.write(`[cb work] watching the queue (every ${intervalS}s) → ${execCmd}\n`);
   // Hot-loop guard: our own live claim is re-offered to us (idempotent), so if
   // the exec exits 0 without completing/releasing the task, the same id comes
@@ -447,7 +447,7 @@ async function workWatch(execCmd: string, intervalS: number): Promise<void> {
   for (;;) {
     let d: any = null;
     try {
-      d = await api("GET", "/tasks/next?claim=true");
+      d = await api("GET", `/tasks/next?claim=true${assignedOnly ? "&strict=true" : ""}`);
     } catch {
       /* transient network error — retry after the interval */
     }
@@ -499,6 +499,9 @@ Project:  --project <id>  |  CONTROLBOARD_PROJECT=<id>  |  cb project use <id>
   cb routine ls | add "<title>" --cron "0 9 * * 1" [--assignee crew:<c>] | pause|resume|rm <id>
   cb usage ls | set '<json>' | clear     # self-report quota so assigners can route by headroom
   cb usage sync [--tool codex|claude] [--watch [--interval <min>]]  # read the local tool's real quota and push it
+  cb work --assigned                     # scheduler-safe: only tasks explicitly assigned to you/your crew
+  cb skill install                       # ambient board skill for Claude Code + Codex (offer-to-track)
+  cb ambient on|off                      # toggle the ambient "track this?" offer
   cb version | self-update               # show the client version / refresh ~/.controlboard from the server
   cb propose "<title>" [--why "..."]
   cb inbox | approve <id> | reject <id> [--reason "..."]
@@ -506,6 +509,63 @@ Project:  --project <id>  |  CONTROLBOARD_PROJECT=<id>  |  cb project use <id>
   cb watch
 
 Global:  --json (machine output)   ·   exit: 0 ok, 1 error, 2 usage, 3 conflict(409)`);
+}
+
+// ── cb skill install — ambient board awareness in every session ──────────────
+// Claude Code loads ~/.claude/skills/*/SKILL.md into every conversation; Codex
+// reads ~/.codex/AGENTS.md. Both get the same behavior: when a session turns
+// into real work, offer ONCE to track it on the board; "no" stays silent for
+// the session; "never" flips the cb ambient marker.
+const AMBIENT_RULES = `When a conversation turns into real work — a multi-step build/fix/investigation that will take a while or produce commits, PRs, or documents — offer ONCE to track it on the user's ControlBoard board (controlboard.ai). Rules:
+
+1. First check: if ~/.config/controlboard/ambient-off exists, or cb is not installed, make NO offer — only act when the user explicitly asks for ControlBoard.
+2. The offer, exactly once per session, short: "Want me to track this on ControlBoard? (yes / no / never ask)". Never interrupt mid-action; ask at a natural pause.
+3. yes → pick the project yourself: run \`cb project ls\` and choose the one whose name matches the repo/directory/topic; otherwise the default. Create the task with a SELF-CONTAINED description (goal, repo + paths, steps done and remaining, how to verify), status "doing"/active, assigned to yourself, then claim it. As you hit milestones append short "## Progress" comments (\`cb task comment <id> "..."\`), and mark it done (\`cb task done <id>\`) when the work completes. If the session ends unfinished, append a final Progress comment saying exactly where you stopped.
+4. no → do not mention ControlBoard again this session. The user asking explicitly always overrides.
+5. never ask → run \`cb ambient off\`, confirm, and treat as "no" from then on.
+6. Board writes are best-effort: never block or delay the actual work on a board failure; mention it once and move on.`;
+
+async function skillInstall(): Promise<void> {
+  const wrote: string[] = [];
+  // Claude Code skill (picked up in every session).
+  const skillDir = join(homedir(), ".claude", "skills", "controlboard");
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(
+    join(skillDir, "SKILL.md"),
+    `---
+name: controlboard
+description: Track substantive work on the user's ControlBoard board (controlboard.ai) with the cb CLI. Use when a session becomes a real multi-step task (build, fix, ship, investigate), when the user mentions ControlBoard, their board, task tracking, or asks what to work on next.
+---
+
+# ControlBoard session tracking
+
+${AMBIENT_RULES}
+
+Useful commands: \`cb project ls\` · \`cb task new "<title>" --content "<handoff details>" --assignee agent:<you> --status doing\` · \`cb task comment <id> "## Progress ..."\` · \`cb task done <id>\` · \`cb work --assigned\` (pull your next assigned task) · \`cb help\` for everything else.
+`,
+  );
+  wrote.push("~/.claude/skills/controlboard/SKILL.md");
+  // Codex global AGENTS.md — managed block, idempotent.
+  const agentsMd = join(homedir(), ".codex", "AGENTS.md");
+  if (existsSync(join(homedir(), ".codex"))) {
+    const START = "<!-- controlboard:start -->";
+    const END = "<!-- controlboard:end -->";
+    const block = `${START}
+## ControlBoard
+
+${AMBIENT_RULES}
+${END}`;
+    let md = "";
+    try { md = readFileSync(agentsMd, "utf8"); } catch { /* new file */ }
+    if (md.includes(START)) {
+      md = md.replace(new RegExp(`${START}[\\s\\S]*?${END}`), block);
+    } else {
+      md = (md ? md.trimEnd() + "\n\n" : "") + block + "\n";
+    }
+    writeFileSync(agentsMd, md);
+    wrote.push("~/.codex/AGENTS.md (ControlBoard section)");
+  }
+  out(`Installed ambient ControlBoard skill:\n  ${wrote.join("\n  ")}\nDisable offers anytime with: cb ambient off`);
 }
 
 // ── Usage adapters (cb usage sync) — CodexBar-style local quota readers ──────
@@ -824,9 +884,9 @@ async function main(): Promise<void> {
         const execCmd = typeof flags.exec === "string" ? flags.exec : "";
         if (!execCmd) die('Usage: cb work --watch --exec \'claude -p\' [--interval 60]', 2);
         const interval = Math.max(10, Number(flags.interval) || 60);
-        return workWatch(execCmd, interval);
+        return workWatch(execCmd, interval, flags.assigned === true);
       }
-      return workOnce();
+      return workOnce(flags.assigned === true);
     }
     case "routine": {
       if (!sub || sub === "ls") {
@@ -874,6 +934,25 @@ async function main(): Promise<void> {
       return out(`cb ${CB_VERSION}`, { version: CB_VERSION });
     case "self-update":
       return selfUpdate();
+    case "skill": {
+      if (sub === "install") return skillInstall();
+      return die("Usage: cb skill install", 2);
+    }
+    case "ambient": {
+      // Toggle the ambient offer ("track this on ControlBoard?") that the
+      // installed skill makes when a session turns into real work.
+      const marker = join(CONFIG_DIR, "ambient-off");
+      if (sub === "off") {
+        mkdirSync(CONFIG_DIR, { recursive: true });
+        writeFileSync(marker, "ambient offers disabled by the user; only act on explicit requests.\n");
+        return out("Ambient ControlBoard offers are OFF (explicit asks still work). Re-enable: cb ambient on");
+      }
+      if (sub === "on") {
+        try { unlinkSync(marker); } catch { /* was already on */ }
+        return out("Ambient ControlBoard offers are ON.");
+      }
+      return out(`Ambient offers are ${existsSync(marker) ? "OFF" : "ON"}. Use: cb ambient on|off`);
+    }
     default:
       return die(`Unknown command: ${cmd}. Run \`cb help\`.`, 2);
   }
