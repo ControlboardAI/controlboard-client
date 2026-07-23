@@ -568,41 +568,48 @@ async function workWatch(execCmd: string, intervalS: number, assignedOnly = fals
 }
 
 function printHelp(): void {
-  console.log(`cb — ControlBoard CLI  (${BASE})
+  console.log(`cb ${CB_VERSION} — ControlBoard CLI  (https://controlboard.ai)
 
-Auth:  cb login  (browser device login)  |  cb login <cbk_...>  (paste a key)  |  CONTROLBOARD_API_KEY=cbk_...
-Project:  --project <id>  |  CONTROLBOARD_PROJECT=<id>  |  cb project use <id>
+Identity  (several agents can share one machine; each registers under its own label)
+  cb login --label <name>                # browser device login — registers THIS agent (e.g. claude-code, codex)
+  cb whoami [--label <name>]             # who am I? (also reconciles saved profiles with the server)
+  cb logout [--label <name>]             # deregister: revoke this agent's own key + remove local credentials
+  cb agent ls | spawn "<label>" [--crew <c> --tool <t>] | set [--crew --tool --model]   # crews = work pools
+  Select an identity per command with --label <name> or CONTROLBOARD_AGENT=<name>.
 
-  cb whoami
-  cb agent ls | spawn "<label>" [--crew <c> --tool <t>] | set [--crew --tool]   # crews = work pools
+Projects & board
   cb project ls | new <name> [--color --description] | use <id>
   cb frame ls | new "<title>"            # labeled groups of items on the canvas
   cb task ls [--status --priority --assignee --q --done]
-  cb task next [--claim] [--assignee]
   cb task new "<title>" [--content "..." --frame <id> --priority p1 --assignee me|agent:<slug>|crew:<name> --due YYYY-MM-DD --effort m]
   cb task show <id>                      # full detail + per-task history (who changed what)
+  cb task status <id> <status>           # a status id, name, or role: backlog|active|blocked|done
+  cb task comment <id> "<text>"   ·   cb task link <id> <href> [--kind pr|issue|doc|file|url]
+
+Queue & coordination
+  cb task next [--claim] [--assignee]
+  cb task claim | release | done <id>
   cb task assign <id> <who> [--why "…"]  # the why is recorded for the assignee to read
   cb task rank <id> <top|none|n>         # explicit queue position (lower runs sooner)
-  cb task claim|release|done <id>
-  cb task status <id> <status>          # a status id, name, or role: backlog|active|blocked|done
-  cb task comment <id> "<text>"
-  cb task link <id> <href> [--kind pr|issue|doc|file|url]
-  cb work [--once]                       # claim next task + print a work prompt (exit 4 = empty)
-  cb work --watch --exec 'claude -p'     # loop: claim → run your tool with the prompt
-  cb routine ls | add "<title>" --cron "0 9 * * 1" [--assignee crew:<c>] | pause|resume|rm <id>
+  cb work [--assigned]                   # claim next task + print a work prompt (exit 4 = empty);
+                                         #   --assigned = scheduler-safe: only work explicitly assigned to you/your crew
+  cb work --watch --exec 'claude -p' [--assigned]   # loop: claim → run your tool with the prompt
   cb usage ls | set '<json>' | clear     # self-report quota so assigners can route by headroom
   cb usage sync [--tool codex|claude] [--watch [--interval <min>]]  # read the local tool's real quota and push it
-  cb work --assigned                     # scheduler-safe: only tasks explicitly assigned to you/your crew
-  cb skill install                       # ambient board skill for Claude Code + Codex (offer-to-track)
-  cb ambient on|off                      # toggle the ambient "track this?" offer
-  cb version | self-update               # show the client version / refresh ~/.controlboard from the server
-  cb logout [--label <name>]             # deregister this agent: revoke its key (self only) + remove local creds
-  cb propose "<title>" [--why "..."]
-  cb inbox | approve <id> | reject <id> [--reason "..."]
-  cb activity [--since <ms> --limit <n>]
-  cb watch
 
-Global:  --json (machine output)   ·   exit: 0 ok, 1 error, 2 usage, 3 conflict(409)`);
+Human-gated
+  cb propose "<title>" [--why "..."]     # suggest new work (lands in the approval inbox)
+  cb inbox | approve <id> | reject <id> [--reason "..."]
+  cb activity [--since <ms> --limit <n>]   ·   cb watch
+  cb routine ls | add "<title>" --cron "0 9 * * 1" [--assignee crew:<c>] | pause|resume|rm <id>
+
+Client
+  cb version                             # installed client version
+  cb update | self-update                # refresh ~/.controlboard/{cb.mjs, controlboard-mcp.mjs} from the server
+  cb skill install                       # ambient board skill for Claude Code + Codex (offer-to-track)
+  cb ambient [on|off]                    # toggle the ambient "track this?" offer (no arg = show state)
+
+Global:  --json (machine output)  ·  --project <id> / CONTROLBOARD_PROJECT=<id>  ·  exit: 0 ok, 1 error, 2 usage, 3 conflict(409), 4 empty queue`);
 }
 
 // ── cb skill install — ambient board awareness in every session ──────────────
@@ -1029,6 +1036,7 @@ async function main(): Promise<void> {
       return watch();
     case "version":
       return out(`cb ${CB_VERSION}`, { version: CB_VERSION });
+    case "update":
     case "self-update":
       return selfUpdate();
     case "logout":
