@@ -12,9 +12,11 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { BoardMirror } from "./mirror";
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+
+const CONFIG_PATH = join(homedir(), ".config", "controlboard", "config.json");
 
 // Config written by `cb login` (device flow), shared across all of this user's
 // projects on this machine.
@@ -71,6 +73,55 @@ process.on("unhandledRejection", (reason) => {
     /* ignore */
   }
 });
+
+// Startup credential check: if this key was deregistered (revoked in the app's
+// Registered agents), don't run half-dead — prune the dead profile from the
+// shared cb config (same lifecycle `cb` itself applies on a 401) and exit with
+// clear guidance. Config-sourced keys on the canonical server only: an env key
+// or a CONTROLBOARD_URL override is never grounds to destroy saved credentials.
+async function verifyKeyOrExit(): Promise<void> {
+  if (process.env.CONTROLBOARD_API_KEY || process.env.CONTROLBOARD_URL) return;
+  try {
+    const res = await fetch(`${BASE}/api/v1/me`, {
+      headers: { Authorization: `Bearer ${KEY}` },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.status !== 401) return;
+    const d: any = await res.json().catch(() => ({}));
+    if (d?.error !== "invalid_api_key") return;
+  } catch {
+    return; // offline — never prune on uncertainty
+  }
+  try {
+    const fresh: CliConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+    const agents = { ...(fresh.agents || {}) };
+    const label = Object.keys(agents).find((l) => agents[l]?.key === KEY);
+    if (label) {
+      delete agents[label];
+      const next: CliConfig = { ...fresh, agents };
+      if (next.default === label) delete next.default;
+      writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), { mode: 0o600 });
+      console.error(
+        `[controlboard-mcp] Agent "${label}" was deregistered (revoked in the app). ` +
+          `Removed its local profile. Re-register with: cb login --label ${label}`,
+      );
+    } else if (fresh.key === KEY) {
+      const next = { ...fresh };
+      delete next.key;
+      delete (next as { agentId?: string }).agentId;
+      writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), { mode: 0o600 });
+      console.error(
+        "[controlboard-mcp] This key was deregistered (revoked in the app). " +
+          "Removed the local credentials. Re-register with: cb login --label <agent-name>",
+      );
+    } else {
+      console.error("[controlboard-mcp] This key was deregistered (revoked in the app). Run cb login again.");
+    }
+  } catch {
+    console.error("[controlboard-mcp] Key was deregistered (revoked in the app). Run cb login again.");
+  }
+  process.exit(1);
+}
 
 // Real-time sync: keep a live local mirror of the board(s) over a WebSocket so
 // the agent can wait for changes instead of polling. On by default; set
@@ -717,6 +768,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
+await verifyKeyOrExit(); // deregistered key → prune the local profile + exit clearly
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`[controlboard-mcp] connected to ${BASE} — ${tools.length} tools ready`);

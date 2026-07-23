@@ -819,6 +819,9 @@ async function main(): Promise<void> {
     }
     case "whoami": {
       const d = await api("GET", "/me");
+      // The natural "check my state" command also reconciles the whole profile
+      // list with the server right now (revoked-elsewhere profiles get pruned).
+      await sweepProfiles(true);
       return out(`${d.user?.email || "?"}  (actor: ${d.actor?.label} · ${d.actor?.kind})`, d);
     }
     case "project": {
@@ -1110,7 +1113,38 @@ async function updateNotice(): Promise<void> {
       const m = await (await fetch(`${BASE}/api/v1/meta`, { signal: AbortSignal.timeout(1500) })).json();
       if (typeof m.cliLatest === "string") writeUpdateCache({ checkedAt: Date.now(), latest: m.cliLatest });
     } catch { writeUpdateCache({ checkedAt: Date.now(), latest: c?.latest ?? CB_VERSION }); }
+    // Same daily window: reconcile ALL saved profiles with the server, so a
+    // revoke made in the app removes the profile here even if this machine
+    // never runs a command as that identity.
+    await sweepProfiles(false);
   }
+}
+
+// Validate every saved profile against the server and prune the ones the server
+// says are deregistered (definitive 401 invalid_api_key). Canonical base only —
+// a staging override proves nothing about a credential's home server.
+async function sweepProfiles(loud: boolean): Promise<void> {
+  if (!CANONICAL_BASE) return;
+  const fresh = readConfig();
+  const entries = Object.entries(fresh.agents || {}).filter(([, a]) => a?.key);
+  for (const [label, a] of entries) {
+    try {
+      const res = await fetch(`${BASE}/api/v1/me`, {
+        headers: { Authorization: `Bearer ${a.key}` },
+        signal: AbortSignal.timeout(2500),
+      });
+      if (res.status === 401) {
+        const d: any = await res.json().catch(() => ({}));
+        if (d?.error === "invalid_api_key") {
+          pruneAgent(label);
+          console.error(`Removed profile "${label}" — it was deregistered (revoked in the app). Re-register with: cb login --label ${label}`);
+        }
+      }
+    } catch {
+      /* offline/slow — never prune on uncertainty */
+    }
+  }
+  if (loud && entries.length === 0) console.error("(no saved agent profiles to check)");
 }
 
 main()
