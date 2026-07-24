@@ -18,6 +18,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <dict>
 	<key>CFBundleIdentifier</key>
 	<string>ai.controlboard.menubar</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleName</key>
 	<string>ControlBoard</string>
 	<key>CFBundleExecutable</key>
@@ -27,9 +29,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.0</string>
+	<string>1.6.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.0</string>
+	<string>1.6.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
@@ -41,6 +43,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+mkdir -p "$APP/Contents/Resources"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 codesign --force -s - "$APP"
 codesign --verify --strict "$APP"
