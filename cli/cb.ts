@@ -515,6 +515,10 @@ async function workOnce(assignedOnly = false): Promise<void> {
   const d = await api("GET", `/tasks/next?claim=true${assignedOnly ? "&strict=true" : ""}`);
   if (!d.task) {
     process.exitCode = 4; // empty queue — callers guard with: t=$(cb work --once) && ...
+    // Scheduler tick with no work: also drain any human-queued machine commands
+    // for THIS identity (stderr only — never pollutes the captured prompt).
+    const lbl = activeLabel(cfg);
+    if (lbl) await drainCommands([lbl], true).catch(() => 0);
     return;
   }
   process.stdout.write(workPrompt(d.task));
@@ -537,7 +541,9 @@ async function workWatch(execCmd: string, intervalS: number, assignedOnly = fals
   // the exec exits 0 without completing/releasing the task, the same id comes
   // straight back. Release it and back off instead of spinning on it.
   let prevOkId: string | null = null;
+  const watchLabel = activeLabel(cfg);
   for (;;) {
+    if (watchLabel) await drainCommands([watchLabel], true).catch(() => 0);
     let d: any = null;
     try {
       d = await api("GET", `/tasks/next?claim=true${assignedOnly ? "&strict=true" : ""}`);
@@ -608,6 +614,8 @@ Client
   cb update | self-update                # refresh ~/.controlboard/{cb.mjs, controlboard-mcp.mjs} from the server
   cb skill install                       # ambient board skill for Claude Code + Codex (offer-to-track)
   cb ambient [on|off]                    # toggle the ambient "track this?" offer (no arg = show state)
+  cb commands run [--label <name>]       # execute human-queued machine commands from the app now
+  cb listen [--interval <s>]             # keep draining machine commands (default 30s)
 
 Global:  --json (machine output)  ·  --project <id> / CONTROLBOARD_PROJECT=<id>  ·  exit: 0 ok, 1 error, 2 usage, 3 conflict(409), 4 empty queue`);
 }
@@ -667,6 +675,110 @@ ${END}`;
     wrote.push("~/.codex/AGENTS.md (ControlBoard section)");
   }
   out(`Installed ambient ControlBoard skill:\n  ${wrote.join("\n  ")}\nDisable offers anytime with: cb ambient off`);
+}
+
+// ── Machine commands — human-queued, allowlisted operations from the app ─────
+// The server can only NAME one of these operations; the argv is fixed here and
+// the child runs this same script — no shell, no server-supplied strings.
+const COMMAND_ARGV: Record<string, (p: Record<string, unknown>) => string[] | null> = {
+  "usage.sync": () => ["usage", "sync"],
+  "client.update": () => ["self-update"],
+  "skill.install": () => ["skill", "install"],
+  "agent.spawn": (p) => {
+    // Mirror of the server clamp — even a compromised server response cannot
+    // smuggle flag-shaped or shell-ish strings into the child argv.
+    const safe = (v: unknown, max: number): string | null => {
+      if (typeof v !== "string") return null;
+      const t = v.trim().slice(0, max);
+      return t && /^[A-Za-z0-9][A-Za-z0-9 ._@-]*$/.test(t) ? t : null;
+    };
+    const label = safe(p.label, 60);
+    if (!label) return null;
+    const argv = ["agent", "spawn", label];
+    const tool = safe(p.tool, 40);
+    const crew = safe(p.crew, 40);
+    if (tool) argv.push("--tool", tool);
+    if (crew) argv.push("--crew", crew);
+    return argv;
+  },
+};
+
+function statusReport(fresh: Config): Record<string, unknown> {
+  return {
+    cbVersion: CB_VERSION,
+    platform: process.platform,
+    node: process.version,
+    profiles: Object.keys(fresh.agents || {}),
+    ambientOff: existsSync(join(CONFIG_DIR, "ambient-off")),
+    skillInstalled: existsSync(join(homedir(), ".claude", "skills", "controlboard", "SKILL.md")),
+    reportedAt: Date.now(),
+  };
+}
+
+// Fetch and execute pending commands for the given labels (default: all saved
+// profiles). Writes ONLY to stderr — safe inside t=$(cb work) substitution.
+async function drainCommands(onlyLabels?: string[], loud = false): Promise<number> {
+  if (!CANONICAL_BASE) return 0; // commands execute only against the real server
+  const fresh = readConfig();
+  const entries: Array<{ label: string; key: string }> = (onlyLabels ?? Object.keys(fresh.agents || {}))
+    .filter((l) => fresh.agents?.[l]?.key)
+    .map((l) => ({ label: l, key: fresh.agents![l].key }));
+  // Legacy single-key configs (no agents map) still drain — the server resolves
+  // the identity from the key itself.
+  if (!entries.length && !onlyLabels && fresh.key) entries.push({ label: "default", key: fresh.key });
+  let ran = 0;
+  for (const { label, key } of entries) {
+    let cmds: any[] = [];
+    try {
+      const res = await fetch(`${BASE}/api/v1/commands`, {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!res.ok) continue;
+      cmds = (await res.json())?.commands ?? [];
+    } catch {
+      continue;
+    }
+    for (const c of cmds) {
+      let ok = false;
+      let result: unknown;
+      if (c.command === "status.report") {
+        ok = true;
+        result = statusReport(readConfig());
+      } else {
+        const argvOf = COMMAND_ARGV[c.command];
+        const argv = argvOf ? argvOf(c.params || {}) : null;
+        if (!argv) {
+          result = { error: `unknown or invalid command: ${String(c.command).slice(0, 40)}` };
+        } else {
+          const env = { ...process.env };
+          if (label !== "default") env.CONTROLBOARD_AGENT = label;
+          else delete env.CONTROLBOARD_AGENT;
+          const r = spawnSync(process.execPath, [process.argv[1], ...argv], {
+            env,
+            encoding: "utf8",
+            timeout: 90_000,
+          });
+          ok = r.status === 0;
+          result = { output: `${r.stdout || ""}${r.stderr || ""}`.trim().slice(-1500) };
+        }
+      }
+      try {
+        const rep = await fetch(`${BASE}/api/v1/commands/${enc(c.id)}/result`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ ok, result }),
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!rep.ok && loud) console.error(`[cb] ${label}: result report for ${c.command} rejected (${rep.status})`);
+      } catch {
+        /* the lease lapses and the server retries, bounded by the attempt cap */
+      }
+      ran++;
+      if (loud) console.error(`[cb] ${label}: ${c.command} ${ok ? "done" : "FAILED"}`);
+    }
+  }
+  return ran;
 }
 
 // ── Usage adapters (cb usage sync) — CodexBar-style local quota readers ──────
@@ -1041,6 +1153,22 @@ async function main(): Promise<void> {
       return selfUpdate();
     case "logout":
       return logout(typeof flags.label === "string" ? flags.label : undefined);
+    case "commands": {
+      if (sub === "run" || sub === undefined) {
+        const only = typeof flags.label === "string" ? [flags.label] : undefined;
+        const n = await drainCommands(only, true);
+        return out(n ? `Executed ${n} command(s).` : "No pending commands.", { ran: n });
+      }
+      return die("Usage: cb commands run [--label <name>]", 2);
+    }
+    case "listen": {
+      const secs = Math.max(10, Number(flags.interval) || 30);
+      process.stderr.write(`[cb listen] draining machine commands every ${secs}s (Ctrl-C to stop)\n`);
+      for (;;) {
+        try { await drainCommands(undefined, true); } catch { /* keep listening */ }
+        await new Promise((r) => setTimeout(r, secs * 1000));
+      }
+    }
     case "skill": {
       if (sub === "install") return skillInstall();
       return die("Usage: cb skill install", 2);
