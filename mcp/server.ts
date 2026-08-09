@@ -228,7 +228,7 @@ const tools: Tool[] = [
   },
   {
     name: "create_item",
-    description: "Create an item (the universal unit: shows on the canvas, Kanban, and timeline). Optionally place it in a frame via frameId, set a date (YYYY-MM-DD) to show it on the timeline, and set task fields (status/priority/assignee/effort). Assign it with assignee: 'me' (the owner), 'agent:<slug>' (another registered agent — discover them with list_agents), or your own agent slug.",
+    description: "Create an item (the universal unit: shows on the canvas, Kanban, and timeline). ALWAYS set frame to the project/area name (e.g. 'Marketing') so the canvas stays organized: matched case-insensitively, created if missing, and the item is auto-laid-out inside. Set a date (YYYY-MM-DD) to show it on the timeline, and set task fields (status/priority/assignee/effort). Assign it with assignee: 'me' (the owner), 'agent:<slug>' (another registered agent — discover them with list_agents), or your own agent slug.",
     inputSchema: {
       type: "object",
       properties: {
@@ -246,7 +246,8 @@ const tools: Tool[] = [
         rank: { type: "number", description: "explicit queue position; lower runs sooner" },
         effort: { type: "string", enum: EFFORTS, description: "rough size: s/m/l" },
         blockedBy: { type: "array", items: { type: "string" }, description: "ids of items that must be done before this one is ready" },
-        frameId: { type: "string", description: "id of a frame to place the item in" },
+        frame: { type: "string", description: "project/area name (or frame id) to group this item under — RECOMMENDED for every item; matched case-insensitively, created if missing, auto-laid-out inside" },
+        frameId: { type: "string", description: "id of a frame to place the item in (prefer `frame` with a name)" },
         x: { type: "number" },
         y: { type: "number" },
         width: { type: "number" },
@@ -257,7 +258,7 @@ const tools: Tool[] = [
   },
   {
     name: "update_item",
-    description: "Update any field of an item. Set frameId to move it into a frame; set frameId to null to remove it from its frame. Reassign with assignee ('me' | 'agent:<slug>' | null).",
+    description: "Update any field of an item. Set frame to a project/area name (find-or-create) or frameId to move it into a frame; set frameId to null to remove it from its frame. Reassign with assignee ('me' | 'agent:<slug>' | null).",
     inputSchema: {
       type: "object",
       required: ["id"],
@@ -279,6 +280,7 @@ const tools: Tool[] = [
         rationale: { type: "string", description: "when changing assignee: WHY this assignee — recorded as a comment for them to read" },
         rank: { type: ["number", "null"], description: "explicit queue position; lower runs sooner, ranked beats unranked, null clears" },
         ifUpdatedAt: { type: "number", description: "optimistic lock: pass the updatedAt you read; the write is refused (409 stale_write, current task returned) if the task changed since — re-read, merge, retry" },
+        frame: { type: "string", description: "project/area name (or frame id) to move the item into — matched case-insensitively, created if missing" },
         frameId: { type: ["string", "null"] },
         x: { type: "number" },
         y: { type: "number" },
@@ -522,13 +524,14 @@ const tools: Tool[] = [
   },
   {
     name: "move_item_to_frame",
-    description: "Move an item into a frame. Pass frameId null to remove it from any frame.",
+    description: "Move an item into a frame. Prefer frame with a project/area name (matched case-insensitively, created if missing). Pass frameId null to remove it from any frame.",
     inputSchema: {
       type: "object",
       required: ["id"],
-      properties: { id: { type: "string" }, frameId: { type: ["string", "null"] } },
+      properties: { id: { type: "string" }, frame: { type: "string", description: "frame name or id (find-or-create)" }, frameId: { type: ["string", "null"] } },
     },
-    run: ({ id, frameId }) => api("PATCH", `/notes/${encodeURIComponent(id)}`, { frameId: frameId ?? null }),
+    run: ({ id, frame, frameId }) =>
+      api("PATCH", `/notes/${encodeURIComponent(id)}`, frame ? { frame } : { frameId: frameId ?? null }),
   },
   // ── Statuses (per-project custom Kanban columns) ───────────────────────────
   {
@@ -581,7 +584,7 @@ const tools: Tool[] = [
   },
   {
     name: "create_frame",
-    description: "Create a frame (a labeled group). Items can be placed inside it.",
+    description: "Create a frame (a labeled group). Find-or-create: if a frame with this title already exists (case-insensitive), it is returned instead of a duplicate (response has created:false). Items can be placed inside it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -707,6 +710,8 @@ const tools: Tool[] = [
 // (you're reading this over the server), so it skips install/login and teaches how to
 // OPERATE the board. Kept tight — it's always in context once the server connects.
 const INSTRUCTIONS = `ControlBoard is a shared "program-manager" board for a human and their AI agents: one set of tasks shown three ways — a timeline, a canvas of cards grouped in frames, and a Kanban board. You are probably ONE of several agents on this board, so coordinate through the queue + claims, and PROPOSE (don't silently add) new work.
+
+Placement discipline — every item you create belongs in a frame (a labeled project/area group on the canvas). Pass frame:"<project or area name>" on create_item: matched case-insensitively against existing frames (check list_frames when unsure what areas exist), created if missing, laid out inside automatically. Loose items with no frame pile up and bury the user's canvas; only leave an item frameless when the user explicitly wants it floating.
 
 First run — if this looks like the user's first session, take a look (list_tasks / list_frames). A new board has a "Getting Started" frame with a "Connect your first agent" task. If that task is still open AND there is no "Setup Agents" frame yet:
 1. Mark it done — set_task_status {id, status:"done"} — that's you, connected.

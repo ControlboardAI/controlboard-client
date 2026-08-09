@@ -273,10 +273,10 @@ async function taskCmd(sub: string | undefined, rest: string[]): Promise<void> {
     }
     case "new": {
       const title = rest[0];
-      if (!title) die('Usage: cb task new "<title>" [--content "..." --frame <id> --priority --assignee --due --effort]', 2);
+      if (!title) die('Usage: cb task new "<title>" [--content "..." --frame "<project area or id>" --priority --assignee --due --effort]', 2);
       const d = await api("POST", "/tasks", {
         title, content: flags.content, priority: flags.priority, assignee: flags.assignee,
-        rationale: flags.rationale ?? flags.why, date: flags.due, effort: flags.effort, frameId: flags.frame,
+        rationale: flags.rationale ?? flags.why, date: flags.due, effort: flags.effort, frame: flags.frame,
       });
       return out(`Created ${d.task.id}  ${d.task.title}`, d);
     }
@@ -587,7 +587,8 @@ Projects & board
   cb project ls | new <name> [--color --description] | use <id>
   cb frame ls | new "<title>"            # labeled groups of items on the canvas
   cb task ls [--status --priority --assignee --q --done]
-  cb task new "<title>" [--content "..." --frame <id> --priority p1 --assignee me|agent:<slug>|crew:<name> --due YYYY-MM-DD --effort m]
+  cb task new "<title>" [--content "..." --frame "<project area>" --priority p1 --assignee me|agent:<slug>|crew:<name> --due YYYY-MM-DD --effort m]
+                        --frame groups the task on the canvas: name or id, matched case-insensitively, created if missing
   cb task show <id>                      # full detail + per-task history (who changed what)
   cb task status <id> <status>           # a status id, name, or role: backlog|active|blocked|done
   cb task comment <id> "<text>"   ·   cb task link <id> <href> [--kind pr|issue|doc|file|url]
@@ -629,7 +630,7 @@ const AMBIENT_RULES = `When a conversation turns into real work — a multi-step
 
 1. First check: if ~/.config/controlboard/ambient-off exists, or cb is not installed, make NO offer — only act when the user explicitly asks for ControlBoard.
 2. The offer, exactly once per session, short: "Want me to track this on ControlBoard? (yes / no / never ask)". Never interrupt mid-action; ask at a natural pause.
-3. yes → pick the project yourself: run \`cb project ls\` and choose the one whose name matches the repo/directory/topic; otherwise the default. Create the task with a SELF-CONTAINED description (goal, repo + paths, steps done and remaining, how to verify), status "doing"/active, assigned to yourself, then claim it. As you hit milestones append short "## Progress" comments (\`cb task comment <id> "..."\`), and mark it done (\`cb task done <id>\`) when the work completes. If the session ends unfinished, append a final Progress comment saying exactly where you stopped.
+3. yes → pick the project yourself: run \`cb project ls\` and choose the one whose name matches the repo/directory/topic; otherwise the default. Create the task with a SELF-CONTAINED description (goal, repo + paths, steps done and remaining, how to verify), status "doing"/active, assigned to yourself, and ALWAYS a frame (--frame "<project or area name>" — the canvas group; matched case-insensitively, created if missing; never leave tasks floating loose), then claim it. As you hit milestones append short "## Progress" comments (\`cb task comment <id> "..."\`), and mark it done (\`cb task done <id>\`) when the work completes. If the session ends unfinished, append a final Progress comment saying exactly where you stopped.
 4. no → do not mention ControlBoard again this session. The user asking explicitly always overrides.
 5. never ask → run \`cb ambient off\`, confirm, and treat as "no" from then on.
 6. Board writes are best-effort: never block or delay the actual work on a board failure; mention it once and move on.`;
@@ -650,7 +651,7 @@ description: Track substantive work on the user's ControlBoard board (controlboa
 
 ${AMBIENT_RULES}
 
-Useful commands: \`cb project ls\` · \`cb task new "<title>" --content "<handoff details>" --assignee agent:<you> --status doing\` · \`cb task comment <id> "## Progress ..."\` · \`cb task done <id>\` · \`cb work --assigned\` (pull your next assigned task) · \`cb help\` for everything else.
+Useful commands: \`cb project ls\` · \`cb task new "<title>" --content "<handoff details>" --frame "<project area>" --assignee agent:<you> --status doing\` · \`cb task comment <id> "## Progress ..."\` · \`cb task done <id>\` · \`cb work --assigned\` (pull your next assigned task) · \`cb help\` for everything else.
 `,
   );
   wrote.push("~/.claude/skills/controlboard/SKILL.md");
